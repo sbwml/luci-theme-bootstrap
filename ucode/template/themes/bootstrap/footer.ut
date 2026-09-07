@@ -14,7 +14,7 @@
 			</span>
 			<ul class="breadcrumb pull-right" id="modemenu" style="display:none"></ul>
 		</footer>
-		<script>L.require('menu-bootstrap')</script>
+		<script>L.require('menu-bootstrap'); L.require('bs-router').then(r => r.init());</script>
 		{% endif %}
 	</body>
 </html>
