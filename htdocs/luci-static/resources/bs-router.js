@@ -88,6 +88,14 @@ function watchSession() {
 	}
 }
 
+function syncPollIndicator() {
+	if (L.Poll && L.Poll.queue && L.Poll.queue.length === 0) {
+		try { ui.hideIndicator('poll-status'); }
+		catch (e) {}
+	}
+}
+document.addEventListener('poll-stop', syncPollIndicator);
+
 function discard(el) {
 	try {
 		const dom = window.L ? window.L.dom : null;
@@ -145,11 +153,15 @@ const RENDER_TIMEOUT = 15000;
 let _inflight = Promise.resolve();
 
 function stageView(contentHost) {
+	if (contentHost && window.getComputedStyle(contentHost).position === 'static') {
+		contentHost.style.position = 'relative';
+	}
 	const wrapper = document.createElement('div');
 	wrapper.className = 'bs-staging';
-	wrapper.style.cssText = 'visibility: hidden; height: 0; overflow: clip; position: relative;';
+	wrapper.style.cssText = 'position: absolute; top: 0; left: 0; width: 100%; height: 0; max-height: 0; overflow: hidden; visibility: hidden; pointer-events: none; opacity: 0; z-index: -9999; margin: 0; padding: 0; border: none;';
 	const view = document.createElement('div');
 	view.id = 'view';
+	view.style.cssText = 'margin: 0; padding: 0; border: none; width: 100%;';
 	wrapper.appendChild(view);
 	contentHost.insertBefore(wrapper, contentHost.firstChild);
 	return { wrapper, view };
@@ -178,10 +190,12 @@ function dropStage(stage) {
 	if (stage && stage.wrapper && stage.wrapper.parentNode) discard(stage.wrapper);
 }
 
-function sweepAround(contentHost) {
+function sweepAround(contentHost, rsegs) {
+	const isOverview = rsegs && rsegs.join('-') === 'admin-status-overview';
 	Array.from(contentHost.children).forEach((c) => {
 		if (c.id !== 'view' && c.id !== 'tabmenu' && !c.classList.contains('bs-staging') &&
-		    !c.classList.contains('alert-message') && c.nodeName !== 'NOSCRIPT')
+		    !c.classList.contains('alert-message') && c.nodeName !== 'NOSCRIPT' &&
+		    !(isOverview && c.nodeName === 'H2' && c.getAttribute('name') === 'content'))
 			discard(c);
 	});
 }
@@ -195,8 +209,8 @@ function liveView(contentHost, stage) {
 	return v;
 }
 
-function commitStage(stage, contentHost) {
-	sweepAround(contentHost);
+function commitStage(stage, contentHost, rsegs) {
+	sweepAround(contentHost, rsegs);
 	const live = liveView(contentHost, stage);
 	const nodes = Array.from(stage.view.childNodes);
 	const dom = window.L ? window.L.dom : null;
@@ -204,6 +218,19 @@ function commitStage(stage, contentHost) {
 		dom.content(live, nodes);
 	else if (live)
 		live.replaceChildren(...nodes);
+
+	if (rsegs && rsegs.join('-') === 'admin-status-overview') {
+		let h2 = contentHost.querySelector('h2[name="content"]');
+		if (!h2) {
+			h2 = document.createElement('h2');
+			h2.setAttribute('name', 'content');
+			const fn = window._ || (typeof _ === 'function' ? _ : null);
+			h2.textContent = fn ? fn('Status') : 'Status';
+			contentHost.insertBefore(h2, live);
+		}
+	}
+
+	renderMenu();
 	dropStage(stage);
 }
 
@@ -382,6 +409,7 @@ function titleHost() {
 	return _titleHost;
 }
 
+let _mbInstance = null;
 function renderMenu() {
 	const treeData = tree.tree();
 	if (!treeData) return;
@@ -390,11 +418,21 @@ function renderMenu() {
 	const topmenu = document.querySelector('#topmenu');
 	const modemenu = document.querySelector('#modemenu');
 	
-	if (tabmenu) { L.dom.content(tabmenu, null); tabmenu.style.display = 'none'; }
-	if (topmenu) { L.dom.content(topmenu, null); topmenu.style.display = 'none'; }
-	if (modemenu) { L.dom.content(modemenu, null); modemenu.style.display = 'none'; }
-	
-	window.L.require('menu-bootstrap').then(mb => mb.render(treeData));
+	const doRender = (mb) => {
+		if (tabmenu) { L.dom.content(tabmenu, null); tabmenu.style.display = 'none'; }
+		if (topmenu) { L.dom.content(topmenu, null); }
+		if (modemenu) { L.dom.content(modemenu, null); }
+		mb.render(treeData);
+	};
+
+	if (_mbInstance) {
+		doRender(_mbInstance);
+	} else {
+		window.L.require('menu-bootstrap').then(mb => {
+			_mbInstance = mb;
+			doRender(mb);
+		});
+	}
 }
 
 let _navGen = 0;
@@ -447,12 +485,6 @@ function navigate(pathname, push) {
 
 	document.title = node.title ? (titleHost() + ' | ' + _(node.title)) : titleHost();
 
-	renderMenu();
-
-	if (push) {
-		window.scrollTo(0, 0);
-	}
-
 	const main = document.getElementById('maincontent');
 	if (main) main.focus({ preventScroll: true });
 
@@ -472,10 +504,9 @@ function navigate(pathname, push) {
 			L.Poll.stop();
 			L.Poll.start();
 		}
+		syncPollIndicator();
 		clearViewIntervals();
 		const uciWarm = flushUciCache();
-
-		document.body.setAttribute('data-page', rsegs.join('-'));
 
 		const stage = stageView(contentHost);
 		const painted = renderedIn(stage.view);
@@ -491,7 +522,12 @@ function navigate(pathname, push) {
 			})
 			.then(() => {
 				if (gen !== _navGen) { dropStage(stage); return; }
-				commitStage(stage, contentHost);
+				document.body.setAttribute('data-page', rsegs.join('-'));
+				commitStage(stage, contentHost, rsegs);
+				if (push && !restoreTo) {
+					window.scrollTo(0, 0);
+				}
+				syncPollIndicator();
 				if (restoreTo) restoreScroll(restoreTo, gen);
 			})
 			.catch((e) => { dropStage(stage); throw e; });
@@ -540,6 +576,7 @@ function wireRouter() {
 	if (vp) _inflight = renderedIn(vp).catch(() => {});
 
 	watchSession();
+	syncPollIndicator();
 
 	document.addEventListener('click', function(ev) {
 		if (ev.defaultPrevented || ev.button !== 0 ||
@@ -590,6 +627,7 @@ return baseclass.extend({
 		ui.menu.load().then((t) => {
 			tree.setTree(t);
 			wireRouter();
+			window.L.require('menu-bootstrap').then(mb => { _mbInstance = mb; }).catch(() => {});
 		});
 	}
 });
